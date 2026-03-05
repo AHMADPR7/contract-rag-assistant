@@ -100,7 +100,6 @@ def load_document(file_path: str) -> List[Document]:
     if ext == ".pdf":
         text = read_pdf_text(str(p))
     elif ext == ".docx":
-        # FIX #8: Removed .doc — python-docx only supports .docx; .doc would fail silently
         text = read_docx_text(str(p))
     elif ext in (".txt", ".md"):
         text = p.read_text(encoding="utf-8", errors="ignore")
@@ -150,7 +149,6 @@ def build_or_replace_vectorstore(chunks: List[Document]) -> Tuple[int, int]:
 def load_vectorstore() -> FAISS:
     global _vs_cache, _retriever_cache
 
-    # FIX #5: Return cached instance if available
     if _vs_cache is not None:
         return _vs_cache
 
@@ -207,14 +205,59 @@ def make_rag_chain(retriever):
             parts.append(f"[{src} | chunk {cid}]\n{d.page_content}")
         return "\n\n---\n\n".join(parts)
 
+    def _extract_text(content) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if isinstance(item.get("text"), str):
+                        parts.append(item["text"])
+                    elif isinstance(item.get("content"), str):
+                        parts.append(item["content"])
+                    elif isinstance(item.get("value"), str):
+                        parts.append(item["value"])
+                    else:
+                        parts.append(str(item))
+                else:
+                    parts.append(str(item))
+            return "\n".join(p for p in parts if p)
+        return str(content)
+
     def format_history(history: list) -> str:
         if not history:
             return "(none)"
+
         lines = []
-        for user_msg, assistant_msg in history:
-            lines.append(f"User: {user_msg}")
-            lines.append(f"Assistant: {assistant_msg}")
-        return "\n".join(lines)
+        for turn in history:
+            # Gradio legacy format: [(user, assistant), ...]
+            if isinstance(turn, (list, tuple)) and len(turn) == 2:
+                user_msg, assistant_msg = turn
+                lines.append(f"User: {_extract_text(user_msg)}")
+                lines.append(f"Assistant: {_extract_text(assistant_msg)}")
+                continue
+
+            # Gradio messages format: [{"role": "user"|"assistant", "content": ...}, ...]
+            if isinstance(turn, dict):
+                role = str(turn.get("role", "")).strip().lower()
+                content = _extract_text(turn.get("content"))
+                if role == "user":
+                    lines.append(f"User: {content}")
+                elif role == "assistant":
+                    lines.append(f"Assistant: {content}")
+                elif role:
+                    lines.append(f"{role.title()}: {content}")
+                else:
+                    lines.append(_extract_text(turn))
+                continue
+
+            # Any unexpected shape should not break the app.
+            lines.append(_extract_text(turn))
+
+        return "\n".join(line for line in lines if line.strip()) or "(none)"
 
     chain = (
         RunnableAssign({
@@ -239,7 +282,7 @@ def ingest_ui(file_obj):
     if file_obj is None:
         return "Please upload a file."
 
-    # FIX #1: Gradio 4+ returns a filepath string directly; older versions return
+    # Gradio 4+ returns a filepath string directly; older versions return
     # an object with a .name attribute. Handle both.
     src = Path(file_obj if isinstance(file_obj, str) else file_obj.name)
     dst = UPLOAD_DIR / src.name
@@ -256,7 +299,7 @@ def ingest_ui(file_obj):
             f"  stored at: {VS_DIR}"
         )
     except Exception as e:
-        return f"❌ Ingestion failed: {e}"
+        return f"  Ingestion failed: {e}"
 
 
 def chat_stream(message, history):
@@ -279,7 +322,6 @@ def chat_stream(message, history):
 
 
 def build_ui():
-    # FIX #8: Removed .doc from accepted file types
     with gr.Blocks(title="Contract RAG Assistant") as demo:
         gr.Markdown(
             "# Contract RAG Assistant\n"
